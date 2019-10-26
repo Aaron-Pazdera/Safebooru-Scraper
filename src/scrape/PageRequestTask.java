@@ -3,6 +3,7 @@ package scrape;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.net.URL;
+import java.net.URLConnection;
 
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
@@ -18,6 +19,7 @@ public class PageRequestTask implements Runnable {
 
 	private PrintWriter outFile;
 	private int pageNumber;
+	private int reportedOffset;
 	private String attribute;
 	private AttributeDump taskOwner;
 
@@ -42,11 +44,15 @@ public class PageRequestTask implements Runnable {
 				// Request next page. Start at 0, requesting the initial one again.
 				DocumentBuilderFactory dbf = DocumentBuilderFactory.newInstance();
 				DocumentBuilder db = dbf.newDocumentBuilder();
-				Document document = db.parse(new URL(apiRequestUrl + pageNumber).openStream());
+				URLConnection connection = new URL(apiRequestUrl + pageNumber).openConnection();
+				connection.setRequestProperty("User-Agent",
+						"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_7_5) AppleWebKit/537.31 (KHTML, like Gecko) Chrome/26.0.1410.65 Safari/537.31");
+				Document document = db.parse(connection.getInputStream());
 
 				// Update the final count, which will tell us if we've reached the end.
 				Element root = document.getDocumentElement();
 				this.finalCount = Integer.parseInt(root.getAttribute("count"));
+				this.reportedOffset = Integer.parseInt(root.getAttribute("offset"));
 
 				// Rip all the urls from the DOM tree
 				Element post;
@@ -59,6 +65,7 @@ public class PageRequestTask implements Runnable {
 						post = (Element) n;
 						synchronized (outFile) {
 							outFile.println(post.getAttribute(attribute));
+							outFile.flush();
 						}
 					}
 				}
@@ -82,7 +89,6 @@ public class PageRequestTask implements Runnable {
 					try {
 						Thread.sleep(2000);
 					} catch (InterruptedException e1) {
-						// TODO Auto-generated catch block
 						System.err.println(e1.getMessage());
 					}
 					continue;
@@ -106,7 +112,8 @@ public class PageRequestTask implements Runnable {
 		// Now that there has been a successful request, and the links have been scraped
 		// from it and written to file, report back.
 		synchronized (taskOwner) {
-			taskOwner.processResult(new PageRequestResult(this.pageNumber, this.finalCount));
+			taskOwner.processResult(new PageRequestResult(this.pageNumber, this.finalCount,
+					this.pageNumber == 0 ? false : this.reportedOffset == 0));
 		}
 
 	}

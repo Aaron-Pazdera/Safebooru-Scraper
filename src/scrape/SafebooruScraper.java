@@ -12,7 +12,7 @@ public class SafebooruScraper {
 	public static void main(String[] args) {
 		String osName = System.getProperty("os.name");
 		String filename = getFilename(args, osName);
-		String tempFilename = "Scraped_Links.txt";
+		String tempFilename = "Temp_Links.txt";
 
 		try {
 			new AttributeDump(new File(tempFilename), AttributeDump.SAMPLE_URL);

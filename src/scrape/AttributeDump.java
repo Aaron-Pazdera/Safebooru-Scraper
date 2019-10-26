@@ -7,6 +7,7 @@ import java.io.IOException;
 import java.io.PrintWriter;
 import java.net.MalformedURLException;
 import java.net.URL;
+import java.net.URLConnection;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -27,12 +28,13 @@ public class AttributeDump {
 	public static final String ID = "id";
 	public static final String SOURCE = "source";
 
+	private static final int trackNumber = 100;
 	private static final int poolSize = 16;
 	private ExecutorService pool = Executors.newFixedThreadPool(poolSize);
 
 	private static final int postsPerPage = 100;
 
-	private Integer initialCount = 0, finalCount = 0, completedTasks = 0;
+	private Integer initialCount = 0, finalCount = 0, completedTracks = 0;
 
 	private final String attribute;
 
@@ -78,7 +80,7 @@ public class AttributeDump {
 
 		// Fill the pool initially with twice as many tasks as it can execute at once.
 		// When they complete, they will automatically add the next ones.
-		for (int page = 0; page < (AttributeDump.poolSize * 2); page++) {
+		for (int page = 0; page < AttributeDump.trackNumber; page++) {
 			pool.execute(new PageRequestTask(this, this.outFile, page, attribute));
 		}
 
@@ -88,7 +90,7 @@ public class AttributeDump {
 		// Restart the pool for one last bit of work.
 		System.out.println("RESTARTING POOL");
 		this.pool = Executors.newFixedThreadPool(poolSize);
-		this.completedTasks = 0;
+		this.completedTracks = 0;
 		// Redownload all the pages at the beginning with new content on them.
 		for (int page = 0; page < (this.finalCount - this.initialCount) / AttributeDump.postsPerPage; page++) {
 			pool.execute(new PageRequestTask(this, outFile, page, this.attribute));
@@ -110,6 +112,8 @@ public class AttributeDump {
 		int nextTaskPage;
 		synchronized (this.finalCount) {
 
+			System.out.println("Task " + result.getCurrentPage() + " returned.");
+
 			// Update the final count. Which is to say, if there have been updates on
 			// Safebooru, and more images have been added, then the finish line has been
 			// moved.
@@ -118,44 +122,90 @@ public class AttributeDump {
 				this.finalCount = newCount;
 			}
 
-			System.out.println("Task " + result.getCurrentPage() + " returned.");
 			// Add the next task to the pool, or don't if that page doesn't exist.
-			nextTaskPage = result.getCurrentPage() + (AttributeDump.poolSize * 2);
-			if (nextTaskPage <= (this.finalCount / AttributeDump.postsPerPage)) {
+			if (!result.isTrackFinished()) {
+				nextTaskPage = result.getCurrentPage() + AttributeDump.trackNumber;
 				System.out.println("Submitting task " + nextTaskPage);
 				pool.execute(new PageRequestTask(this, outFile, nextTaskPage, this.attribute));
 			}
-		}
-
-		// Count the number of tasks that have been completed, and shut down the pool if
-		// we've done them all.
-		synchronized (completedTasks) {
-			completedTasks++;
-			if (this.completedTasks == (this.finalCount / postsPerPage) + 1) {
-				try {
-					if (!pool.isShutdown()) {
-						System.out.println("SHUTTING DOWN POOL");
-						pool.shutdown();
-						pool.awaitTermination(60, TimeUnit.SECONDS);
-						synchronized (outFile) {
-							outFile.close();
+			// If the track is completed, increment how many tracks are done. If all tracks are done, shut down
+			// the pool.
+			else {
+				synchronized (this.completedTracks) {
+					completedTracks++;
+					if (this.completedTracks == AttributeDump.trackNumber) {
+						try {
+							if (!pool.isShutdown()) {
+								System.out.println("SHUTTING DOWN POOL");
+								pool.shutdown();
+								pool.awaitTermination(60, TimeUnit.SECONDS);
+								synchronized (outFile) {
+									outFile.close();
+								}
+								// Tell the constructor to continue, and to redownload the first few pages.
+								initialCount.notify();
+							}
+						} catch (InterruptedException e) {
+							e.printStackTrace();
 						}
-						// Tell the constructor to continue, and to redownload the first few pages.
-						initialCount.notify();
 					}
-				} catch (InterruptedException e) {
-					e.printStackTrace();
 				}
 			}
 		}
 	}
 
-	private int getCount() throws ParserConfigurationException, MalformedURLException, SAXException, IOException {
+	private int getCount() {
+		int count = 0;
+		boolean finished = false;
+		while (!finished) {
+			try {
+				DocumentBuilderFactory dbf = DocumentBuilderFactory.newInstance();
+				DocumentBuilder db = dbf.newDocumentBuilder();
+				URLConnection connection = new URL(apiRequestUrl + "0").openConnection();
+				connection.setRequestProperty("User-Agent",
+						"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_7_5) AppleWebKit/537.31 (KHTML, like Gecko) Chrome/26.0.1410.65 Safari/537.31");
+				Document document = db.parse(connection.getInputStream());
+				Element root = document.getDocumentElement();
+				count = Integer.parseInt(root.getAttribute("count"));
+				finished = true;
+
+			} catch (IOException e) {
+				// If windows is shitting the bed, try again.
+				if (e instanceof java.net.UnknownHostException) {
+					System.out.println("Please verify that you are connected to the internet. Retrying initial count.");
+					continue;
+				} else if (e instanceof java.net.SocketException) {
+					System.out.println("Socket error. Retrying initial count.");
+					continue;
+				}
+
+				// If you get an error in the 500 range, wait 2 seconds and try again.
+				if (e.getMessage().matches(".*5.. for URL.*")) {
+					System.out.println("Server returned an error. Retrying initial count.");
+					try {
+						Thread.sleep(1000);
+					} catch (InterruptedException e1) {
+						System.err.println(e1.getMessage());
+					}
+					continue;
+				} else {
+					// If it isn't one of these things, at least for the purposes of debugging, I
+					// want to make it explode.
+					e.printStackTrace();
+					System.exit(1);
+				}
+			}
+			// These two are unrecoverable.
+			catch (SAXException e) {
+				e.printStackTrace();
+				System.exit(1);
+			} catch (ParserConfigurationException e) {
+				e.printStackTrace();
+				System.exit(1);
+			}
+		}
 		// Make a request and get the count from it.
-		DocumentBuilderFactory dbf = DocumentBuilderFactory.newInstance();
-		DocumentBuilder db = dbf.newDocumentBuilder();
-		Document document = db.parse(new URL(apiRequestUrl + 0).openStream());
-		Element root = document.getDocumentElement();
-		return Integer.parseInt(root.getAttribute("count"));
+
+		return count;
 	}
 }
